@@ -4,6 +4,7 @@ LOG_MODULE_REGISTER(udp_poll_sample, LOG_LEVEL_DBG);
 #include <zephyr/kernel.h>
 #include <zephyr/net/socket.h>
 #include <zephyr/net/udp.h>
+#include <zephyr/net/wifi_mgmt.h>
 #include <zephyr/posix/arpa/inet.h>
 #include <zephyr/posix/sys/eventfd.h>
 
@@ -139,15 +140,17 @@ static int _poll(int sock, struct zsock_pollfd *pollfds) {
     sock = -1;
     return -ECONNRESET;
   }
-  
-  memset(rx_buf, 0, sizeof(rx_buf)); 
-  ret = zsock_recvfrom(sock, rx_buf, sizeof(rx_buf), ZSOCK_MSG_TRUNC, NULL, NULL);
-  if (ret > sizeof(rx_buf)) {
-    LOG_ERR("Buffer size insufficient to receive data packet");
-    return -ENOBUFS;
+
+  if (pollfds[SOCKET_FD_IDX].revents & ZSOCK_POLLIN) {
+    /* Read socket if POLLIN event */
+    memset(rx_buf, 0, sizeof(rx_buf));
+    ret = zsock_recvfrom(sock, rx_buf, sizeof(rx_buf), ZSOCK_MSG_TRUNC | ZSOCK_MSG_DONTWAIT, NULL, NULL);
+    if (ret > sizeof(rx_buf)) {
+      LOG_ERR("Buffer size insufficient to receive data packet");
+      return -ENOBUFS;
+    }
+    LOG_INF("Received: %s", rx_buf);
   }
-  
-  LOG_INF("Received: %s", rx_buf);
 
 #endif
 
@@ -172,12 +175,25 @@ void main() {
     LOG_INF("Expectation: wait indefinitely for eventfd to be signaled");
     LOG_INF("Actual: waits indefinitely for eventfd to be signaled");
   }
-  
+
   LOG_INF("---------------");
 
 #if (SOCKET_ONLY || SOCKET_AND_EVENTFD)
-  LOG_INF("Waiting 10 seconds for wifi to come up...");
-  k_msleep(10000);
+  LOG_INF("Waiting for wifi to be connected...");
+
+  while (1) {
+    struct net_if *iface = net_if_get_default();
+    struct wifi_iface_status status = { 0 };
+
+    net_mgmt(NET_REQUEST_WIFI_IFACE_STATUS, iface, &status, sizeof(struct wifi_iface_status));
+
+    if (status.state == WIFI_STATE_COMPLETED) {
+      LOG_INF("WiFi connected !");
+      break;
+    }
+
+    k_msleep(1000);
+  }
 
   sock = _connect(REMOTE_IP, PORT);
   if (sock < 0) {
@@ -195,7 +211,7 @@ void main() {
 
 #if (EVENTFD_ONLY || SOCKET_AND_EVENTFD)
   k_timer_start(&my_timer, K_SECONDS(7), K_SECONDS(7));
-  
+
   event_fd = eventfd(0, 0);
   LOG_INF("Eventfd: %d", event_fd);
 #else
